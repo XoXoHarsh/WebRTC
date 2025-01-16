@@ -1,4 +1,3 @@
-// server/src/server.ts
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -8,7 +7,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:5173", // Vite default port
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
@@ -23,15 +22,15 @@ const rooms = new Map<string, Room>();
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  // Create a new meeting room
   socket.on("create-room", (callback) => {
     const roomId = randomUUID();
     rooms.set(roomId, { id: roomId, participants: [socket.id] });
+    console.log("Room created:", roomId);
+    console.log("Participants:", rooms.get(roomId)?.participants);
     socket.join(roomId);
     callback(roomId);
   });
 
-  // Join existing room
   socket.on("join-room", (roomId: string, callback) => {
     const room = rooms.get(roomId);
     if (!room) {
@@ -45,36 +44,47 @@ io.on("connection", (socket) => {
     }
 
     room.participants.push(socket.id);
+    console.log("Joining room:", roomId);
+    console.log("Participants:", room.participants);
     socket.join(roomId);
     callback({ success: true });
-
-    // Notify other participant
-    socket.to(roomId).emit("user-joined", socket.id);
   });
 
-  // Handle WebRTC signaling
+  socket.on("peer-ready", (roomId: string) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    const host = room.participants[0];
+    console.log("Peer is ready, notifying host:", host);
+    io.to(host).emit("user-joined");
+  });
+
   socket.on("offer", ({ to, offer }) => {
-    socket.to(to).emit("offer", { from: socket.id, offer });
+    // Send offer to all clients in the room except sender
+    console.log("send offer to all client", to);
+    socket.to(to).emit("offer", { offer });
   });
 
   socket.on("answer", ({ to, answer }) => {
-    socket.to(to).emit("answer", { from: socket.id, answer });
+    // Send answer to all clients in the room except sender
+    socket.to(to).emit("answer", { answer });
   });
 
   socket.on("ice-candidate", ({ to, candidate }) => {
-    socket.to(to).emit("ice-candidate", { from: socket.id, candidate });
+    socket.to(to).emit("ice-candidate", { candidate });
   });
 
   socket.on("disconnect", () => {
-    // Remove user from any room they're in
     rooms.forEach((room, roomId) => {
       const index = room.participants.indexOf(socket.id);
       if (index !== -1) {
         room.participants.splice(index, 1);
         if (room.participants.length === 0) {
           rooms.delete(roomId);
+        } else {
+          // Notify remaining participants
+          io.to(roomId).emit("user-left");
         }
-        io.to(roomId).emit("user-left", socket.id);
       }
     });
   });

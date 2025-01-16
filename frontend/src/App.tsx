@@ -1,4 +1,3 @@
-// client/src/App.tsx
 import {
   BrowserRouter as Router,
   Routes,
@@ -14,6 +13,7 @@ import { Toaster } from "./components/ui/toaster";
 
 function App() {
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [isHost, setIsHost] = useState(false);
 
   useEffect(() => {
     const newSocket = io(`${import.meta.env.VITE_SERVER_URL}`);
@@ -48,14 +48,17 @@ function App() {
                     Create or join a meeting with just one click
                   </p>
                   <div className="flex flex-col md:flex-row gap-4 md:gap-8 justify-center">
-                    <CreateMeeting socket={socket} />
-                    <JoinMeeting socket={socket} />
+                    <CreateMeeting socket={socket} setIsHost={setIsHost} />
+                    <JoinMeeting socket={socket} setIsHost={setIsHost} />
                   </div>
                 </div>
               </div>
             }
           />
-          <Route path="/room/:roomId" element={<VideoRoom socket={socket} />} />
+          <Route
+            path="/room/:roomId"
+            element={<VideoRoom socket={socket} isHost={isHost} />}
+          />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
         <Toaster />

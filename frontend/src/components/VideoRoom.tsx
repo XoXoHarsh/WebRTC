@@ -1,9 +1,8 @@
-// client/src/components/VideoRoom.tsx
 import React, { useEffect, useRef, useState } from "react";
 import { Socket } from "socket.io-client";
 import { WebRTCConnection } from "../lib/webrtc";
 import { Button } from "./ui/button";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   Copy,
   Loader2,
@@ -15,13 +14,13 @@ import {
   Users,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { useParams } from "react-router-dom";
 
 interface VideoRoomProps {
   socket: Socket;
+  isHost: boolean;
 }
 
-const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
+const VideoRoom: React.FC<VideoRoomProps> = ({ socket, isHost }) => {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const [webrtc, setWebrtc] = useState<WebRTCConnection | null>(null);
@@ -29,23 +28,39 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [isRemoteConnected, setIsRemoteConnected] = useState(false);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
   const { roomId } = useParams();
 
   useEffect(() => {
-    const initializeRoom = async () => {
-      const connection = new WebRTCConnection(socket, remoteVideoRef);
-      setWebrtc(connection);
+    if (localStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, localVideoRef]);
+
+  useEffect(() => {
+    let connection: WebRTCConnection;
+    const initialiseWebRTC = async () => {
+      console.log("Initialising the webrtc connection");
+      connection = new WebRTCConnection(
+        socket,
+        remoteVideoRef,
+        roomId!,
+        (connected) => setIsRemoteConnected(connected)
+      );
 
       try {
         const stream = await connection.initializeLocalStream();
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
+        setLocalStream(stream);
+        setWebrtc(connection);
         setIsConnecting(false);
+        if (!isHost) {
+          console.log("Emitting peer-ready signal");
+          socket.emit("peer-ready", roomId);
+        }
       } catch (error) {
-        console.error("Failed to access media devices:", error);
+        console.log("Failed to access media devices: ", error);
         toast({
           title: "Error",
           description: "Failed to access camera or microphone",
@@ -55,33 +70,62 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
       }
     };
 
-    initializeRoom();
+    initialiseWebRTC()
+      .then(() => {
+        if (isHost) {
+          socket.on("user-joined", async () => {
+            console.log("User has joined, creating offer");
+            try {
+              console.log("Creating offer");
+              const offer = await connection.createOffer();
+              console.log("Offer created, sending to room", offer);
+              socket.emit("offer", { to: roomId, offer });
+            } catch (error) {
+              console.error("Error creating offer:", error);
+            }
+          });
 
-    socket.on("user-joined", () => {
-      setIsRemoteConnected(true);
-      toast({
-        title: "User Connected",
-        description: "Another participant has joined the meeting",
+          socket.on(
+            "answer",
+            async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
+              console.log("received answer");
+              await connection.handleAnswer(answer);
+            }
+          );
+        } else {
+          console.log("Joiner");
+          socket.on(
+            "offer",
+            async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
+              console.log("received offer");
+              const answer = await connection.handleOffer(offer);
+              socket.emit("answer", { to: roomId, answer });
+            }
+          );
+        }
+        socket.on("user-left", () => {
+          setIsRemoteConnected(false);
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null;
+          }
+          toast({
+            title: "User disconnected",
+            description: "The other participant has left the meeting",
+          });
+        });
+      })
+      .catch((error) => {
+        console.error("Error initialising WebRTC:", error);
       });
-    });
-
-    socket.on("user-left", () => {
-      setIsRemoteConnected(false);
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = null;
-      }
-      toast({
-        title: "User Disconnected",
-        description: "The other participant has left the meeting",
-      });
-    });
 
     return () => {
       socket.off("user-joined");
       socket.off("user-left");
-      webrtc?.cleanup();
+      socket.off("offer");
+      socket.off("answer");
+      connection.cleanup();
     };
-  }, [socket, roomId]);
+  }, [socket, roomId, isHost]);
 
   const handleCopyRoomId = () => {
     navigator.clipboard.writeText(roomId!);
@@ -97,9 +141,8 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
   };
 
   const toggleMute = () => {
-    const stream = localVideoRef.current?.srcObject as MediaStream;
-    if (stream) {
-      stream.getAudioTracks().forEach((track) => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach((track) => {
         track.enabled = isMuted;
       });
       setIsMuted(!isMuted);
@@ -114,9 +157,8 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
   };
 
   const toggleVideo = () => {
-    const stream = localVideoRef.current?.srcObject as MediaStream;
-    if (stream) {
-      stream.getVideoTracks().forEach((track) => {
+    if (localStream) {
+      localStream.getVideoTracks().forEach((track) => {
         track.enabled = isVideoOff;
       });
       setIsVideoOff(!isVideoOff);
@@ -161,26 +203,27 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
       <div className="max-w-7xl mx-auto">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
           {/* Local Video */}
-          <div className="video-container group">
+          <div className="video-container group relative h-96">
             {isConnecting ? (
               <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
                 <Loader2 className="w-8 h-8 text-white animate-spin" />
               </div>
             ) : (
-              <>
+              <div className="w-full h-full relative">
                 <video
                   ref={localVideoRef}
                   autoPlay
                   playsInline
                   muted
-                  className={isVideoOff ? "hidden" : ""}
+                  className={`w-full h-full object-cover ${
+                    isVideoOff ? "hidden" : ""
+                  }`}
                 />
                 {isVideoOff && (
                   <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
                     <VideoOff className="w-16 h-16 text-gray-600" />
                   </div>
                 )}
-                <div className="video-overlay opacity-0 group-hover:opacity-100 transition-opacity" />
                 <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
                   <div className="text-white text-sm bg-black/50 px-3 py-1.5 rounded-full flex items-center gap-2">
                     <div
@@ -191,13 +234,21 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
                     You {isMuted && "(Muted)"}
                   </div>
                 </div>
-              </>
+              </div>
             )}
           </div>
 
           {/* Remote Video */}
-          <div className="video-container group">
-            {!isRemoteConnected ? (
+          <div className="video-container group relative h-96">
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              className={`w-full h-full object-cover ${
+                !isRemoteConnected ? "hidden" : ""
+              }`}
+            />
+            {!isRemoteConnected && (
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-800">
                 <Users className="w-16 h-16 text-gray-600 mb-4" />
                 <p className="text-gray-400 text-center">
@@ -207,14 +258,6 @@ const VideoRoom: React.FC<VideoRoomProps> = ({ socket }) => {
                   Share the room ID to invite others
                 </p>
               </div>
-            ) : (
-              <>
-                <video ref={remoteVideoRef} autoPlay playsInline />
-                <div className="video-overlay opacity-0 group-hover:opacity-100 transition-opacity" />
-                <div className="absolute bottom-4 left-4 text-white text-sm bg-black/50 px-3 py-1.5 rounded-full">
-                  Remote User
-                </div>
-              </>
             )}
           </div>
         </div>

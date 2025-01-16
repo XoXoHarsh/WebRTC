@@ -8,9 +8,13 @@ import { useToast } from "@/hooks/use-toast";
 
 interface CreateMeetingProps {
   socket: Socket;
+  setIsHost: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
-export const CreateMeeting: React.FC<CreateMeetingProps> = ({ socket }) => {
+export const CreateMeeting: React.FC<CreateMeetingProps> = ({
+  socket,
+  setIsHost,
+}) => {
   const [roomId, setRoomId] = useState<string>("");
   const [isCreating, setIsCreating] = useState(false);
   const navigate = useNavigate();
@@ -20,6 +24,7 @@ export const CreateMeeting: React.FC<CreateMeetingProps> = ({ socket }) => {
     setIsCreating(true);
     socket.emit("create-room", (newRoomId: string) => {
       setRoomId(newRoomId);
+      setIsHost(true);
       navigate(`/room/${newRoomId}`);
     });
   };
